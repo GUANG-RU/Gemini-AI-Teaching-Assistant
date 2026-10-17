@@ -549,3 +549,4 @@ with gr.Blocks(title="程式設計教育輔助系統", theme=gr.themes.Soft(), c
 
 if __name__ == "__main__":
     demo.launch(inbrowser=True)
+    
