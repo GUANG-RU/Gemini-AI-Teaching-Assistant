@@ -1,0 +1,11 @@
+{
+    "_comment": "程式教學專用 Gemini 模型白名單 (自動排除 tts 與 live 語音模型)",
+    "free_models": [
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite"
+    ],
+    "paid_models": [
+        "gemini-4-argon"
+    ]
+}

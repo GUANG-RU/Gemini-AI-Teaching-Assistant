@@ -1,6 +1,7 @@
 import os
 import sys
 import webbrowser
+import json  # 🌟 新增這行：用來讀寫我們的模型資料庫
 import gradio as gr
 import google.generativeai as genai
 
@@ -44,6 +45,32 @@ PROMPT_PRACTICE_TEMPLATE = """請分析以下程式碼所包含的「核心語�
 [原始程式碼]：
 {code}
 """
+# ==========================================
+# 🌟 模型資料庫 (JSON) 處理機制
+# ==========================================
+DB_FILENAME = "models_db.json"
+
+def load_model_db():
+    """讀取模型白名單資料庫。如果不存在，則自動建立一個預設版本。"""
+    if not os.path.exists(DB_FILENAME):
+        # 預設的白名單資料庫庫結構
+        default_db = {
+            "_comment": "請在此處新增或刪除您想開放給系統使用的 Gemini 模型關鍵字",
+            "free_models": [
+                "gemini-1.5-flash",
+                "gemini-2.0-flash"
+            ],
+            "paid_models": [
+                "gemini-1.5-pro",
+                "gemini-2.0-pro"
+            ]
+        }
+        with open(DB_FILENAME, "w", encoding="utf-8") as f:
+            json.dump(default_db, f, indent=4, ensure_ascii=False)
+        return default_db
+        
+    with open(DB_FILENAME, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 # ==========================================
 # 2. 核心功能函式
@@ -78,13 +105,32 @@ def call_gemini_stream(api_key, model_name, prompt):
         clean_name = model_name.replace("models/", "").strip()
         model = genai.GenerativeModel(clean_name)
         
-        response = model.generate_content(prompt, stream=True)
+        # 🌟 關鍵修正：宣告自訂的安全設定，將所有過濾門檻降到最低 (BLOCK_NONE)
+        # 避免程式專有名詞 (如 kill process, execute, injection) 遭誤判攔截
+        custom_safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        
+        # 💡 將 safety_settings 參數傳遞給 generate_content
+        response = model.generate_content(
+            prompt, 
+            stream=True,
+            safety_settings=custom_safety_settings
+        )
         
         full_text = ""
         for chunk in response:
-            full_text += chunk.text
-            yield full_text
-            
+            try:
+                full_text += chunk.text
+                yield full_text
+            except ValueError:
+                full_text += "\n\n⚠️ **[系統提示]** AI 內容產生中斷（已觸發 Google API 底層硬性安全機制）。"
+                yield full_text
+                break
+                
     except Exception as e:
         yield f"❌ 呼叫 API 時發生錯誤：{str(e)}"
 
@@ -164,7 +210,7 @@ css_code = """
     visibility: hidden !important;
 }
 
-/* 2. 灰色連體工具列條 */
+/* 2. 灰色連體工具列條 (移除外框，讓紅色的線消失) */
 .custom-code-header {
     background-color: #2D3342 !important;
     border-top-left-radius: 8px !important;
@@ -173,14 +219,25 @@ css_code = """
     margin-bottom: 0px !important;
     gap: 4px !important;
     align-items: center !important;
+    position: relative !important;
+    z-index: 10 !important;
+    
+    /* 🌟 關鍵修正 1：移除這裡的 border 設定，上方就不會有白框了 */
+    border: none !important; 
 }
 
-/* 3. 下方 Code 編輯區：負邊距無縫貼緊灰色工具列 */
+/* 3. 下方 Code 編輯區：畫出完整的白框 (讓綠色的線出現) */
 .aligned-code-box {
     width: 100% !important;
     box-sizing: border-box !important;
-    margin-top: -18px !important;
-    border: 2px solid #FFFFFF !important; /* 白色實線邊框 */
+    margin-top: -2px !important; 
+    
+    /* 🌟 關鍵修正 2：四面都畫上 2px 白框，這樣上邊框就會剛好出現在綠色圈選處 */
+    border: 2px solid #FFFFFF !important; 
+    
+    /* 確保上方保持直角貼齊工具列，下方維持圓角 */
+    border-top-left-radius: 0px !important;
+    border-top-right-radius: 0px !important;
     border-bottom-left-radius: 8px !important;
     border-bottom-right-radius: 8px !important;
     overflow: hidden !important;
@@ -227,19 +284,24 @@ with gr.Blocks(title="程式設計教育輔助系統", theme=gr.themes.Soft(), c
                 status_text = gr.Markdown(" ")
                 model_tier_radio = gr.Radio(
                     label="🎯 模型等級 (強制二選一)",
-                    choices=["🟢 左側：免費教育模型", "🔴 右側：進階付費模型"],
-                    value="🟢 左側：免費教育模型"
+                    choices=["🟢 免費教育模型 (Flash)", "🔴 旗艦推理模型 (Argon)"], # 💡 更新了更專業的名稱
+                    value="🟢 免費教育模型 (Flash)"
                 )
                 with gr.Row():
-                    free_model_selector = gr.Dropdown(label="🟢 免費教育模型", choices=["(請先載入模型)"], value="(請先載入模型)", scale=1)
-                    paid_model_selector = gr.Dropdown(label="🔴 進階付費模型", choices=["(請先載入模型)"], value="(請先載入模型)", scale=1)
+                    free_model_selector = gr.Dropdown(
+                        label="🟢 免費教育模型", choices=["(請先載入模型)"], value="(請先載入模型)", scale=1
+                    )
+                    paid_model_selector = gr.Dropdown(
+                        label="🔴 旗艦推理模型", choices=["(請先載入模型)"], value="(請先載入模型)", scale=1, 
+                        visible=False # 💡 預設隱藏進階模型
+                    )
 
             # --- 區塊 2：程式碼輸入區 ---
             # --- 區塊 2-1：程式碼來源與上傳區 ---
             with gr.Group():
                 source_radio = gr.Radio(["📝 直接貼上", "📁 上傳檔案"], label="程式碼來源", value="📝 直接貼上")
                 
-            with gr.Group():
+            with gr.Group(visible=False) as upload_group:
                 gr.Markdown(
                     """
                     <div style="
@@ -260,36 +322,37 @@ with gr.Blocks(title="程式設計教育輔助系統", theme=gr.themes.Soft(), c
                 file_uploader = gr.File(label="", show_label=False)
                 
             # --- 區塊 2-2：程式碼編輯區 ---
-            with gr.Row(equal_height=True, elem_classes=["custom-code-header"]):
-                gr.Markdown(
-                    """
-                    <div style="
-                        background-color: var(--button-primary-background-fill, #6366F1); 
-                        color: white; 
-                        padding: 6px 14px; 
-                        border-radius: 8px; 
-                        font-size: 14px; 
-                        font-weight: bold; 
-                        display: inline-block;
-                        margin-bottom: 0px;
-                        box-shadow: none;
-                    ">
-                        &lt;/&gt; 程式碼編輯區
-                    </div>
-                    """
-                ) 
-                btn_download_code = gr.Button("📥 下載", size="sm", scale=0, min_width=70)
-                btn_copy_code = gr.Button("📄 複製", size="sm", scale=0, min_width=70)
-                btn_paste_code = gr.Button("📋 貼上", size="sm", scale=0, min_width=70)
-                btn_clear_code = gr.Button("🗑️ 清除", size="sm", scale=0, min_width=70)
+            with gr.Group(visible=True) as code_group:
+                with gr.Row(equal_height=True, elem_classes=["custom-code-header"]):
+                    gr.Markdown(
+                        """
+                        <div style="
+                            background-color: var(--button-primary-background-fill, #6366F1); 
+                            color: white; 
+                            padding: 6px 14px; 
+                            border-radius: 8px; 
+                            font-size: 14px; 
+                            font-weight: bold; 
+                            display: inline-block;
+                            margin-bottom: 0px;
+                            box-shadow: none;
+                        ">
+                            &lt;/&gt; 程式碼編輯區
+                        </div>
+                        """
+                    ) 
+                    btn_download_code = gr.Button("📥 下載", size="sm", scale=0, min_width=70)
+                    btn_copy_code = gr.Button("📄 複製", size="sm", scale=0, min_width=70)
+                    btn_paste_code = gr.Button("📋 貼上", size="sm", scale=0, min_width=70)
+                    btn_clear_code = gr.Button("🗑️ 清除", size="sm", scale=0, min_width=70)
 
-            code_input = gr.Code(
-                label="", 
-                show_label=False, 
-                language="python", 
-                lines=8,
-                elem_classes=["aligned-code-box"]
-            )
+                code_input = gr.Code(
+                    label="", 
+                    show_label=False, 
+                    language="python", 
+                    lines=8,
+                    elem_classes=["aligned-code-box"]
+                )
 
             # --- 區塊 2-3：錯誤訊息輸入區 ---
             with gr.Group():
@@ -340,40 +403,93 @@ with gr.Blocks(title="程式設計教育輔助系統", theme=gr.themes.Soft(), c
             genai.configure(api_key=api_key.strip())
             free_models, paid_models = [], []
             
-            # 定義已被停用或棄用的模型關鍵字清單（強制過濾掉）
-            DEPRECATED_MODELS = ["gemini-1.0", "gemini-1.5-flash-8b", "gemini-2.5"]
+            # 1. 讀取我們的模型資料庫 (白名單)
+            db = load_model_db()
+            allowed_free = db.get("free_models", [])
+            allowed_paid = db.get("paid_models", [])
             
+            # 2. 取得 Google 官方目前提供的所有模型
             raw_models = []
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     name = m.name.replace("models/", "").strip()
                     name_lower = name.lower()
                     
-                    # 只過濾包含 gemini 且未在棄用清單中的模型
-                    if "gemini" in name_lower:
-                        if any(dep in name_lower for dep in DEPRECATED_MODELS):
-                            continue
-                        raw_models.append(name)
+                    # ⛔ 關鍵修正：強制黑名單攔截！
+                    # 只要檔名包含這些字，不管有沒有符合白名單，全部直接踢除！
+                    black_list = ["tts", "live", "audio", "vision", "embedding", "aqa", "imagen", "veo"]
+                    if any(bad_word in name_lower for bad_word in black_list):
+                        continue # 直接跳過，不加入清單
+                        
+                    raw_models.append(name)
             
             # 將模型清單倒序排列（最新版本會在最前）
             raw_models.sort(reverse=True)
             
+            # 3. 資料庫比對過濾 (交集篩選)
             for name in raw_models:
-                if "flash" in name.lower():
+                name_lower = name.lower()
+                
+                if any(allowed.lower() in name_lower for allowed in allowed_free):
                     free_models.append(name)
-                else:
+                elif any(allowed.lower() in name_lower for allowed in allowed_paid):
                     paid_models.append(name)
             
             if not free_models and not paid_models:
-                return gr.update(), gr.update(), "⚠️ **找不到支援的模型。**"
+                return gr.update(), gr.update(), "⚠️ **找不到支援的模型，請檢查 models_db.json 設定檔。**"
                 
             def_free = free_models[0] if free_models else "(無可用免費模型)"
             def_paid = paid_models[0] if paid_models else "(無可用付費模型)"
             return gr.Dropdown(choices=free_models or [def_free], value=def_free), \
                    gr.Dropdown(choices=paid_models or [def_paid], value=def_paid), \
-                   "✅ **模型載入成功（已自動濾除所有已棄用的舊版模型）！**"
+                   "✅ **模型載入成功（已套用本地模型資料庫篩選）！**"
         except Exception as e:
             return gr.update(), gr.update(), f"❌ **載入失敗：** {str(e)}"
+
+    # ==========================================
+    # 🌟 動態切換顯示區塊邏輯
+    # ==========================================
+    def toggle_input_source(choice):
+        if "上傳檔案" in choice:
+            return gr.update(visible=True), gr.update(visible=False)
+        else:
+            return gr.update(visible=False), gr.update(visible=True)
+
+    source_radio.change(
+        fn=toggle_input_source,
+        inputs=[source_radio],
+        outputs=[upload_group, code_group]
+    )
+
+    # ==========================================
+    # 🌟 動態切換顯示區塊邏輯 (模型等級與輸入來源)
+    # ==========================================
+    
+    # 1. 模型選單動態切換
+    def toggle_model_visibility(choice):
+        if "免費" in choice:
+            return gr.update(visible=True), gr.update(visible=False)
+        else:
+            return gr.update(visible=False), gr.update(visible=True)
+
+    model_tier_radio.change(
+        fn=toggle_model_visibility,
+        inputs=[model_tier_radio],
+        outputs=[free_model_selector, paid_model_selector]
+    )
+
+    # 💡 (如果您還要加入之前的程式碼來源切換，也放在這裡)
+    def toggle_input_source(choice):
+        if "上傳檔案" in choice:
+            return gr.update(visible=True), gr.update(visible=False)
+        else:
+            return gr.update(visible=False), gr.update(visible=True)
+
+    source_radio.change(
+        fn=toggle_input_source,
+        inputs=[source_radio],
+        outputs=[upload_group, code_group] # 記得前面要把 gr.Group 加上 as upload_group 喔
+    )
 
     btn_load_models.click(fn=fetch_and_split_models, inputs=[api_key_input], outputs=[free_model_selector, paid_model_selector, status_text])
     
